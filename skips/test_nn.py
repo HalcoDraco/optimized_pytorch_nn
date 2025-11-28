@@ -5,6 +5,7 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 from time import time
 import torch.nn.functional as F
+from pruned_model import SimpleMLP
 
 class Bmk:
     """
@@ -53,45 +54,7 @@ class Bmk:
     def reset(self):
         self.__times = []
 
-
 bmk = Bmk()
-
-class SimpleMnistCNN(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.network = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Flatten(),
-            nn.Linear(64 * 7 * 7, 10)
-        )
-
-    def forward(self, x):
-        return self.network(x)
-    
-class SimpleCifarCNN(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.network = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Flatten(),
-            nn.Linear(256 * 4 * 4, 10)
-        )
-
-    def forward(self, x):
-        return self.network(x)
     
 def train_epoch(model: nn.Module, train_loader: DataLoader, device: torch.device, optimizer: torch.optim.Optimizer, criterion: nn.Module, scaler: torch.amp.GradScaler, config: dict) -> float:
     """
@@ -199,18 +162,18 @@ def get_data_loader(config: dict, train: bool) -> DataLoader:
         The DataLoader for the MNIST dataset.
     """
     
-    # transform_mnist = transforms.Compose([
-    #     transforms.ToTensor(),
-    #     transforms.Normalize((0.1307,), (0.3081,))
-    # ])
-
-    transfrom_cifar10 = transforms.Compose([
+    transform_mnist = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+        transforms.Normalize((0.1307,), (0.3081,))
     ])
 
-    # dataset = datasets.MNIST(root='./data', train=train, download=True, transform=transform_mnist)
-    dataset = datasets.CIFAR10(root='./data', train=train, download=True, transform=transfrom_cifar10)
+    # transfrom_cifar10 = transforms.Compose([
+    #     transforms.ToTensor(),
+    #     transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+    # ])
+
+    dataset = datasets.MNIST(root='./data', train=train, download=True, transform=transform_mnist)
+    # dataset = datasets.CIFAR10(root='./data', train=train, download=True, transform=transfrom_cifar10)
 
     data_loader = DataLoader(
         dataset,
@@ -229,7 +192,7 @@ def train_model(train_loader, config, val_loader=None):
     torch.backends.cudnn.benchmark = config["cudnn_benchmark"]
     print(f"Using device: {device}")
 
-    model = SimpleCifarCNN().to(device)
+    model = SimpleMLP().to(device)
     optimizer = optim.AdamW(model.parameters(), lr=config["learning_rate"])
     criterion = nn.CrossEntropyLoss()
 
@@ -268,72 +231,26 @@ def main(config):
     bmk("DataLoader prepared.")
     train_model(train_loader, config, val_loader)
     bmk("Training complete.")
-    
-    bmk("Deleting DataLoaders.")
-    del train_loader._iterator
-    del val_loader._iterator
-    bmk("DataLoaders deleted.")
+
 
 if __name__ == '__main__':
 
-    configs_gridsearch = {
-        "device": ["cuda"],
-        "batch_size": [128],
-        "num_workers": [8],
-        "pin_memory": [False, True],
-        "non_blocking": [False, True],
-        "persistent_workers": [True],
-        "none_gradients": [False, True],
-        "cudnn_benchmark": [False, True],
-        "amp": [False, True],
-        "learning_rate": [1e-4],
-        "epochs": [20],
-        "use_val": [True],
-        "benchmark": [False],
+    CONFIG = {
+        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "batch_size": 128,
+        "num_workers": 8,
+        "pin_memory": True,
+        "non_blocking": True,
+        "persistent_workers": True,
+        "none_gradients": True,
+        "cudnn_benchmark": False,
+        "amp": False,
+        "learning_rate": 1e-4,
+        "epochs": 20,
+        "use_val": True,
+        "benchmark": True,
     }
 
-    from itertools import product
-
-    cartesian_product_dicts = [dict(zip(configs_gridsearch.keys(), values)) for values in product(*configs_gridsearch.values())]
-    times = {}
-    bmk.set(False)
-    reps = 3
-
-    print("Warming up...")
-    main(cartesian_product_dicts[-1])  # Warm-up run
-    print("Starting grid search...")
-
-    for config in cartesian_product_dicts:
-        print(f"Running configuration: {config}")
-        times[str(config)] = []
-        for i in range(reps):
-            init_time = time()
-            main(config)
-            end_time = time()
-            times[str(config)].append(end_time - init_time)
-            print(end_time - init_time)
-    
-    for config in times:
-        avg_time = sum(times[config]) / len(times[config])
-        print(f"Config: {config}, Times: {times[config]}, Average Time: {avg_time:.4f}")
-
-
-    # CONFIG = {
-    #     "device": "cuda" if torch.cuda.is_available() else "cpu",
-    #     "batch_size": 256,
-    #     "num_workers": 8,
-    #     "pin_memory": True,
-    #     "non_blocking": True,
-    #     "persistent_workers": True,
-    #     "none_gradients": True,
-    #     "cudnn_benchmark": True,
-    #     "amp": True,
-    #     "learning_rate": 1e-4,
-    #     "epochs": 20,
-    #     "use_val": True,
-    #     "benchmark": True,
-    # }
-
-    # bmk.set(CONFIG["benchmark"])
-    # main(CONFIG)
-    # bmk.report()
+    bmk.set(CONFIG["benchmark"])
+    main(CONFIG)
+    bmk.report()

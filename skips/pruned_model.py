@@ -1,3 +1,11 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader
+from time import time
+import torch.nn.functional as F
+
 class SimpleMLP(nn.Module):
     def __init__(self):
         super().__init__()
@@ -40,7 +48,7 @@ class SimpleMLP(nn.Module):
                 outs[self.layer_selector(i, o, num_layers)] = F.relu(self.linear_layers[self.layer_selector(i, o, num_layers)](layer_outs[i]))
             layer_outs[o] = outs[self.layer_selector(0, o, num_layers)]
             for i in range(1, o):
-                layer_outs[o] += outs[self.layer_selector(i, o, num_layers)]
+                layer_outs[o] = layer_outs[o] + outs[self.layer_selector(i, o, num_layers)]
 
         return layer_outs[-1]
 
@@ -48,3 +56,4 @@ class SimpleMLP(nn.Module):
     def layer_selector(input_layer_idx: int, output_layer_idx: int, num_layers: int) -> int:
         return (num_layers*(num_layers-1) - (num_layers-input_layer_idx)*(num_layers-input_layer_idx-1))//2 + (output_layer_idx - input_layer_idx) - 1
 
+    #TODO: Pruning
