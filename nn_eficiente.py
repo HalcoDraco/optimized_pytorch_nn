@@ -79,19 +79,72 @@ class SimpleCifarCNN(nn.Module):
         self.network = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=3, padding=1),
             nn.ReLU(),
+            nn.BatchNorm2d(64),
             nn.MaxPool2d(kernel_size=2, stride=2),
             nn.Conv2d(64, 128, kernel_size=3, padding=1),
             nn.ReLU(),
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm2d(128),
             nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Dropout(0.5),
             nn.Conv2d(128, 256, kernel_size=3, padding=1),
             nn.ReLU(),
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm2d(256),
             nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Dropout(0.5),
             nn.Flatten(),
-            nn.Linear(256 * 4 * 4, 10)
+            nn.Linear(256 * 4 * 4, 512),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(512, 10)
         )
 
     def forward(self, x):
         return self.network(x)
+    
+class SimpleCifarMLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(3 * 32 * 32, 512),
+            nn.ReLU(),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 10)
+        )
+
+    def forward(self, x):
+        return self.network(x)
+    
+class EarlyStopping:
+    def __init__(self, patience: int = 5, min_delta: float = 0.0):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_loss = float('inf')
+        self.best_state = None
+        self.counter = 0
+
+    def __call__(self, model: nn.Module, val_loss: float) -> bool:
+        if val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.counter = 0
+            self.best_state = model.state_dict()
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                return True
+        return False
+
+    def get_best_state(self):
+        return self.best_state
     
 def train_epoch(model: nn.Module, train_loader: DataLoader, device: torch.device, optimizer: torch.optim.Optimizer, criterion: nn.Module, scaler: torch.amp.GradScaler, config: dict) -> float:
     """
@@ -222,7 +275,7 @@ def get_data_loader(config: dict, train: bool) -> DataLoader:
     )
     return data_loader
 
-def train_model(train_loader, config, val_loader=None):
+def train_model(train_loader, config, val_loader=None, early_stopping=None):
     
     device = torch.device(config["device"])
     scaler = torch.amp.GradScaler(device=config["device"], enabled=config["amp"])
@@ -242,6 +295,12 @@ def train_model(train_loader, config, val_loader=None):
         if val_loader is not None:
             val_loss = test_model(model, val_loader, device, criterion, config)
             print(f"Epoch {epoch+1}/{config['epochs']}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            if early_stopping is not None and early_stopping(model, val_loss):
+                print(f"Early stopping at epoch {epoch+1}, restoring best model...")
+                best_state = early_stopping.get_best_state()
+                if best_state is not None:
+                    model.load_state_dict(best_state)
+                break
         else:
             print(f"Epoch {epoch+1}/{config['epochs']}, Train Loss: {train_loss:.4f}")
 
@@ -266,7 +325,8 @@ def main(config):
         print("Size of validation dataset:", len(val_loader.dataset))
 
     bmk("DataLoader prepared.")
-    train_model(train_loader, config, val_loader)
+    early_stopping = EarlyStopping(patience=5, min_delta=0.01)
+    train_model(train_loader, config, val_loader, early_stopping=early_stopping)
     bmk("Training complete.")
     
     bmk("Deleting DataLoaders.")
@@ -276,64 +336,64 @@ def main(config):
 
 if __name__ == '__main__':
 
-    configs_gridsearch = {
-        "device": ["cuda"],
-        "batch_size": [128],
-        "num_workers": [8],
-        "pin_memory": [False, True],
-        "non_blocking": [False, True],
-        "persistent_workers": [True],
-        "none_gradients": [False, True],
-        "cudnn_benchmark": [False, True],
-        "amp": [False, True],
-        "learning_rate": [1e-4],
-        "epochs": [20],
-        "use_val": [True],
-        "benchmark": [False],
-    }
-
-    from itertools import product
-
-    cartesian_product_dicts = [dict(zip(configs_gridsearch.keys(), values)) for values in product(*configs_gridsearch.values())]
-    times = {}
-    bmk.set(False)
-    reps = 3
-
-    print("Warming up...")
-    main(cartesian_product_dicts[-1])  # Warm-up run
-    print("Starting grid search...")
-
-    for config in cartesian_product_dicts:
-        print(f"Running configuration: {config}")
-        times[str(config)] = []
-        for i in range(reps):
-            init_time = time()
-            main(config)
-            end_time = time()
-            times[str(config)].append(end_time - init_time)
-            print(end_time - init_time)
-    
-    for config in times:
-        avg_time = sum(times[config]) / len(times[config])
-        print(f"Config: {config}, Times: {times[config]}, Average Time: {avg_time:.4f}")
-
-
-    # CONFIG = {
-    #     "device": "cuda" if torch.cuda.is_available() else "cpu",
-    #     "batch_size": 256,
-    #     "num_workers": 8,
-    #     "pin_memory": True,
-    #     "non_blocking": True,
-    #     "persistent_workers": True,
-    #     "none_gradients": True,
-    #     "cudnn_benchmark": True,
-    #     "amp": True,
-    #     "learning_rate": 1e-4,
-    #     "epochs": 20,
-    #     "use_val": True,
-    #     "benchmark": True,
+    # configs_gridsearch = {
+    #     "device": ["cuda"],
+    #     "batch_size": [128],
+    #     "num_workers": [8],
+    #     "pin_memory": [False, True],
+    #     "non_blocking": [False, True],
+    #     "persistent_workers": [True],
+    #     "none_gradients": [False, True],
+    #     "cudnn_benchmark": [False, True],
+    #     "amp": [False, True],
+    #     "learning_rate": [1e-4],
+    #     "epochs": [20],
+    #     "use_val": [True],
+    #     "benchmark": [False],
     # }
 
-    # bmk.set(CONFIG["benchmark"])
-    # main(CONFIG)
-    # bmk.report()
+    # from itertools import product
+
+    # cartesian_product_dicts = [dict(zip(configs_gridsearch.keys(), values)) for values in product(*configs_gridsearch.values())]
+    # times = {}
+    # bmk.set(False)
+    # reps = 3
+
+    # print("Warming up...")
+    # main(cartesian_product_dicts[-1])  # Warm-up run
+    # print("Starting grid search...")
+
+    # for config in cartesian_product_dicts:
+    #     print(f"Running configuration: {config}")
+    #     times[str(config)] = []
+    #     for i in range(reps):
+    #         init_time = time()
+    #         main(config)
+    #         end_time = time()
+    #         times[str(config)].append(end_time - init_time)
+    #         print(end_time - init_time)
+    
+    # for config in times:
+    #     avg_time = sum(times[config]) / len(times[config])
+    #     print(f"Config: {config}, Times: {times[config]}, Average Time: {avg_time:.4f}")
+
+
+    CONFIG = {
+        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "batch_size": 256,
+        "num_workers": 8,
+        "pin_memory": True,
+        "non_blocking": True,
+        "persistent_workers": True,
+        "none_gradients": True,
+        "cudnn_benchmark": True,
+        "amp": False,
+        "learning_rate": 1e-4,
+        "epochs": 50,
+        "use_val": True,
+        "benchmark": True,
+    }
+
+    bmk.set(CONFIG["benchmark"])
+    main(CONFIG)
+    bmk.report()
