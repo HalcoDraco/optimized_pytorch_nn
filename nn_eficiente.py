@@ -1,10 +1,14 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torchvision import datasets, transforms
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from time import time
 import torch.nn.functional as F
+import numpy as np
+
+CIFAR10_NORMALIZATION = ((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
 
 class Bmk:
     """
@@ -146,6 +150,20 @@ class EarlyStopping:
     def get_best_state(self):
         return self.best_state
     
+class BestCheckpointSaver:
+    def __init__(self, save_path: str, min_delta: float = 0.0, restore_best: bool = True):
+        self.restore_best = restore_best
+        self.save_path = save_path
+        self.min_delta = min_delta
+        self.best_loss = float('inf')
+        self.best_state = None
+
+    def __call__(self, model: nn.Module, val_loss: float):
+        if val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.best_state = model.state_dict()
+            torch.save(self.best_state, self.save_path)
+    
 def train_epoch(model: nn.Module, train_loader: DataLoader, device: torch.device, optimizer: torch.optim.Optimizer, criterion: nn.Module, scaler: torch.amp.GradScaler, config: dict) -> float:
     """
     Train the model for one epoch.
@@ -235,62 +253,115 @@ def test_model(model: nn.Module, test_loader: DataLoader, device: torch.device, 
 
     return loss_sum / len(test_loader)
 
-def get_data_loader(config: dict, train: bool) -> DataLoader:
+def get_data_loader(config: dict, train: bool, batch_size: int = None, shuffle: bool = None) -> DataLoader:
     """
-    Get DataLoader for MNIST dataset.
+    Get DataLoader for CIFAR dataset.
 
     Parameters
     ----------
     config : dict
         Configuration dictionary with DataLoader parameters.
     train : bool
-        Whether to load the training or validation dataset.
+        Whether to get the training or test DataLoader.
+    batch_size : int, optional
+        The batch size for the DataLoader.
+    shuffle : bool, optional
+        Whether to shuffle the dataset.
     
     Returns
     -------
     data_loader : DataLoader
-        The DataLoader for the MNIST dataset.
+        The DataLoader for the CIFAR dataset.
     """
-    
-    # transform_mnist = transforms.Compose([
-    #     transforms.ToTensor(),
-    #     transforms.Normalize((0.1307,), (0.3081,))
-    # ])
 
-    transfrom_cifar10 = transforms.Compose([
+    if batch_size is None:
+        batch_size = config["batch_size"]
+
+    test_transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+        transforms.Normalize(*CIFAR10_NORMALIZATION)
     ])
 
-    # dataset = datasets.MNIST(root='./data', train=train, download=True, transform=transform_mnist)
-    dataset = datasets.CIFAR10(root='./data', train=train, download=True, transform=transfrom_cifar10)
+    train_transform = transforms.Compose([
+        transforms.AutoAugment(transforms.AutoAugmentPolicy.CIFAR10),
+        transforms.ToTensor(),
+        transforms.Normalize(*CIFAR10_NORMALIZATION)
+    ])
+
+    full_train_dataset = datasets.CIFAR10(root='./data', train=True, 
+                                                  download=True, transform=train_transform)
+    full_val_dataset   = datasets.CIFAR10(root='./data', train=True, 
+                                                    download=True, transform=test_transform)
+    test_dataset       = datasets.CIFAR10(root='./data', train=False, 
+                                                    download=True, transform=test_transform)
+    
+    if not train:
+        dataset = test_dataset
+    elif train and config["use_val"]:
+        val_proportion = 0.15
+        dataset_size = len(full_train_dataset)
+        indices = list(range(dataset_size))
+        split = int(np.floor(val_proportion * dataset_size))
+        
+        # Shuffle indices manually with a fixed seed
+        np.random.seed(42)
+        np.random.shuffle(indices)
+        
+        train_indices, val_indices = indices[split:], indices[:split]
+
+        # Create Subsets using the specific transforms
+        dataset = Subset(full_train_dataset, train_indices)
+        val_ds  = Subset(full_val_dataset, val_indices)
+    else:
+        dataset = full_train_dataset
 
     data_loader = DataLoader(
         dataset,
-        batch_size=config["batch_size"],
-        shuffle=train,
+        batch_size=batch_size,
+        shuffle=shuffle if shuffle is not None else train,
         num_workers=config["num_workers"],
         pin_memory=config["pin_memory"],
         persistent_workers=config["persistent_workers"]
     )
+
+    if train and config["use_val"]:
+        val_dataloader = DataLoader(
+            val_ds,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=config["num_workers"],
+            pin_memory=config["pin_memory"],
+            persistent_workers=config["persistent_workers"]
+        )
+
+        return data_loader, val_dataloader
+
     return data_loader
 
-def train_model(train_loader, config, val_loader=None, early_stopping=None):
+def train_model(model, 
+                train_loader, 
+                optimizer, 
+                criterion, 
+                config, 
+                val_loader=None, 
+                early_stopping: EarlyStopping=None,
+                best_checkpoint_saver: BestCheckpointSaver=None, 
+                scheduler=None,
+                save_path=None):
     
     device = torch.device(config["device"])
     scaler = torch.amp.GradScaler(device=config["device"], enabled=config["amp"])
     torch.backends.cudnn.benchmark = config["cudnn_benchmark"]
     print(f"Using device: {device}")
 
-    model = SimpleCifarCNN().to(device)
-    optimizer = optim.AdamW(model.parameters(), lr=config["learning_rate"])
-    criterion = nn.CrossEntropyLoss()
-
     bmk("Starting training loop")
 
     for epoch in range(config["epochs"]):
 
         train_loss = train_epoch(model, train_loader, device, optimizer, criterion, scaler, config)
+
+        if scheduler is not None:
+            scheduler.step()
 
         if val_loader is not None:
             val_loss = test_model(model, val_loader, device, criterion, config)
@@ -301,12 +372,25 @@ def train_model(train_loader, config, val_loader=None, early_stopping=None):
                 if best_state is not None:
                     model.load_state_dict(best_state)
                 break
+
+            if best_checkpoint_saver is not None:
+                best_checkpoint_saver(model, val_loss)
         else:
             print(f"Epoch {epoch+1}/{config['epochs']}, Train Loss: {train_loss:.4f}")
 
         bmk(f"Completed epoch {epoch+1}")
 
     print("Training complete!")
+
+    if best_checkpoint_saver is not None and best_checkpoint_saver.restore_best:
+        print("Restoring best model from checkpoint...")
+        model.load_state_dict(best_checkpoint_saver.best_state)
+
+    if save_path is not None:
+        torch.save(model.state_dict(), save_path)
+        print(f"Model saved to {save_path}")
+
+    return model
 
 def main(config):
 
@@ -317,16 +401,40 @@ def main(config):
 
     bmk("Start")
 
-    train_loader = get_data_loader(config, train=True)
-    val_loader = get_data_loader(config, train=False) if config["use_val"] else None
+    if config["use_val"]:
+        train_loader, val_loader = get_data_loader(config, train=True)
+    else:
+        train_loader = get_data_loader(config, train=True)
+        val_loader = None
 
     print("Size of training dataset:", len(train_loader.dataset))
     if val_loader:
         print("Size of validation dataset:", len(val_loader.dataset))
 
     bmk("DataLoader prepared.")
-    early_stopping = EarlyStopping(patience=5, min_delta=0.01)
-    train_model(train_loader, config, val_loader, early_stopping=early_stopping)
+    model = SimpleCifarCNN().to(torch.device(config["device"]))
+    optimizer = optim.AdamW(model.parameters(), lr=config["learning_rate"])
+    criterion = nn.CrossEntropyLoss()
+    early_stopping = EarlyStopping(patience=5, min_delta=0.01) if config["use_val"] else None
+
+    best_checkpoint_saver = BestCheckpointSaver(save_path="best_cifar_model.pth", min_delta=0.01) if config["use_val"] else None
+
+    warmup_epochs = 10
+    scheduler1 = LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs)
+    scheduler2 = CosineAnnealingLR(optimizer, T_max=config["epochs"] - warmup_epochs)
+    scheduler = SequentialLR(optimizer, schedulers=[scheduler1, scheduler2], milestones=[warmup_epochs])
+
+    train_model(model, 
+                train_loader, 
+                optimizer, 
+                criterion, 
+                config, 
+                val_loader=val_loader, 
+                early_stopping=early_stopping,
+                best_checkpoint_saver=best_checkpoint_saver,
+                scheduler=scheduler,
+                save_path="final_cifar_model.pth")
+    
     bmk("Training complete.")
     
     bmk("Deleting DataLoaders.")
