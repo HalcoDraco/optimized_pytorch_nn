@@ -6,13 +6,14 @@ from torch.utils.data import DataLoader
 from time import time
 import torch.nn.functional as F
 
-class SimpleMLP(nn.Module):
+class PruningMLP(nn.Module):
     def __init__(self):
         super().__init__()
 
         self.flatten = nn.Flatten()
 
-        self.dims = [28 * 28, 128, 32, 32, 32, 10]
+        self.dims = [28 * 28, 128, 32, 32, 32, 10] # MNIST dimensions
+        self.dims = [3 * 32 * 32, 128, 32, 32, 32, 10] # CIFAR-10 dimensions
 
         self.linear_layers = nn.ModuleList([
             nn.Linear(self.dims[0], self.dims[1]),

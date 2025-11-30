@@ -5,7 +5,7 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 from time import time
 import torch.nn.functional as F
-from pruned_model import SimpleMLP
+from pruned_model import PruningMLP
 
 class Bmk:
     """
@@ -192,7 +192,7 @@ def train_model(train_loader, config, val_loader=None):
     torch.backends.cudnn.benchmark = config["cudnn_benchmark"]
     print(f"Using device: {device}")
 
-    model = SimpleMLP().to(device)
+    model = PruningMLP().to(device)
     optimizer = optim.AdamW(model.parameters(), lr=config["learning_rate"])
     criterion = nn.CrossEntropyLoss()
 
@@ -246,7 +246,7 @@ if __name__ == '__main__':
         "cudnn_benchmark": False,
         "amp": False,
         "learning_rate": 1e-4,
-        "epochs": 20,
+        "epochs": 10,
         "use_val": True,
         "benchmark": True,
     }
